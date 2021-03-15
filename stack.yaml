@@ -1,0 +1,213 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: API Gateway, Lambda, and Dynamo.
+
+Resources:
+  # Policy required for all lambda function roles.
+  BaseLambdaExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Base permissions needed by all lambda functions.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: "*"
+
+  ProductTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: ProductId
+          AttributeType: S
+        - AttributeName: Tag
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ProductId
+          KeyType: HASH
+        - AttributeName: Tag
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+      - IndexName: "TagIndex"
+        KeySchema:
+          - AttributeName: Tag
+            KeyType: HASH
+        Projection:
+          ProjectionType: ALL 
+
+  TestAPIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${AWS::StackName}-TestAPIGateway"
+      Description: A description
+      FailOnWarnings: true
+      Body:
+        swagger: 2.0
+        info:
+          description: |
+            The account API.
+          version: 1.0
+        basePath: /
+        schemes:
+          - https
+        consumes:
+          - application/json
+        produces:
+          - application/json
+        paths:
+          /products:
+            post:
+              description: post products to product db
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PostProductLambda.Arn}/invocations"
+                credentials: !GetAtt TestAPIGatewayRole.Arn
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+              parameters:
+                - name: body
+                  in: body
+                  description: body
+                  required: true
+                  schema:
+                    type: object
+          /products/{productId}:
+            get:
+              description: get product by product id from db
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetProductLambda.Arn}/invocations"
+                credentials: !GetAtt TestAPIGatewayRole.Arn
+                passthroughBehavior: when_no_match
+                httpMethod: GET
+                type: aws_proxy
+              parameters:
+                - name: productId
+                  in: path
+                  description: productId
+                  required: true
+                  schema:
+                    type: string
+          /products/search?tags=tag1,tag2:
+            get:
+              description: get products by tags from db
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryByTagsLambda.Arn}/invocations"
+                credentials: !GetAtt TestAPIGatewayRole.Arn
+                passthroughBehavior: when_no_match
+                httpMethod: GET
+                type: aws_proxy
+              parameters:
+                - name: tags
+                  in: path
+                  description: tags
+                  required: true
+                  schema:
+                    type: string
+
+  TestAPIGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref TestAPIGateway
+      StageName: prod
+
+  TestAPIGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt PostProductLambda.Arn
+                  - !GetAtt GetProductLambda.Arn
+                  - !GetAtt QueryByTagsLambda.Arn
+
+  PostProductLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt ProductLambdaRole.Arn 
+      Handler: index.handleHttpRequest
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          DB: !Sub "arn:aws:dynamodb:${AWS::Region}:*:table/${ProductTable}"
+      Code:
+        ZipFile: |
+          exports.handlers = function(event, context) {}
+  GetProductLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt ProductLambdaRole.Arn 
+      Handler: index.handleHttpRequest
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          DB: !Sub "arn:aws:dynamodb:${AWS::Region}:*:table/${ProductTable}"
+      Code:
+        ZipFile: |
+          exports.handlers = function(event, context) {}
+  QueryByTagsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt ProductLambdaRole.Arn 
+      Handler: index.handleHttpRequest
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          DB: !Sub "arn:aws:dynamodb:${AWS::Region}:*:table/${ProductTable}"
+      Code:
+        ZipFile: |
+          exports.handlers = function(event, context) {}
+  
+  ProductLambdaRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref BaseLambdaExecutionPolicy
+      Policies:
+        - PolicyName: dynamodball
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:*:table/${ProductTable}"
+        - PolicyName: apiGateway
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Principal: "*"
+                Action:
+                  - execute-api:Invoke
+                Resource: "*"
